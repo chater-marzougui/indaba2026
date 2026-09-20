@@ -77,7 +77,7 @@ def sentinel(*args):
                           capture_output=True, text=True)
 
 
-print(f"\n{'scenario':<44} {'atk':<5} {'task':<5} {'steps':<6} {'termination':<12} usable")
+print(f"\n{'scenario':<44} {'atk':<5} {'task':<5} {'steps':<6} {'termination':<12} {'time':>6} usable")
 usable = []
 for path in CANDIDATES:
     name = Path(path).stem
@@ -93,8 +93,12 @@ for path in CANDIDATES:
     ok = bool(d["attack_success"])
     if ok:
         usable.append((name, int(time.time() - t0)))
+    # Elapsed per row, not just for the winners: the first scenario is the only timing signal you get
+    # before committing hours to a serial 8B sweep, and a row that never reaches the attack still
+    # costs full price.
     print(f"{name:<44} {str(d['attack_success']):<5} {str(d['task_success']):<5} "
-          f"{d['steps']:<6} {d['termination']:<12} {'YES' if ok else 'no -- payload never reached'}", flush=True)
+          f"{d['steps']:<6} {d['termination']:<12} {int(time.time()-t0):>5}s "
+          f"{'YES' if ok else 'no -- payload never reached'}", flush=True)
 
 print("\n=== usable for the video (attack lands undefended) ===")
 for name, secs in usable:
