@@ -62,9 +62,14 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
                     f"from huggingface_hub import snapshot_download; snapshot_download({MODEL!r})"], check=True)
 
 # Our loader, ours, so src/sentinel/ stays untouched. See runner/qwen3_8b.py.
+#
+# The dtype switch mirrors .scratch/kaggle-cell.py exactly, so the check and the recording cannot
+# silently run at different precisions. A T4 has no native bf16 (Turing emulates it) and real fp16
+# tensor cores, so if bf16 is too slow here, set SENTINEL_FP16=1 and set it again for the sweep.
+DTYPE = "float16" if os.environ.get("SENTINEL_FP16") == "1" else "bfloat16"
 PRELUDE = ("import sentinel.cli as c\n"
            "from runner.qwen3_8b import build\n"
-           "c._model_factory = lambda m: (lambda: build(m))\n")
+           f"c._model_factory = lambda m: (lambda: build(m, dtype={DTYPE!r}))\n")
 
 
 def sentinel(*args):

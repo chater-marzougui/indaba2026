@@ -55,6 +55,11 @@ class OffloadAdapter(HFModelAdapter):
         self._tools: list[dict[str, object]] = []
 
 
-def build(model: str = DEFAULT_MODEL) -> OffloadAdapter:
-    """``--model`` argument -> adapter, with the same aliases ``sentinel.cli._model_factory`` uses."""
-    return OffloadAdapter(DEFAULT_MODEL if model in ALIASES else model)
+def build(model: str = DEFAULT_MODEL, dtype: str = "bfloat16") -> OffloadAdapter:
+    """``--model`` argument -> adapter, with the same aliases ``sentinel.cli._model_factory`` uses.
+
+    ``dtype`` is separate because it is a declared config change, not a model choice: bfloat16 is the
+    faithful default, float16 is the escape hatch when a card emulates bf16 (Turing has no native
+    support for it). Whichever you pick, use it for the check and the recording both.
+    """
+    return OffloadAdapter(DEFAULT_MODEL if model in ALIASES else model, dtype=dtype)
