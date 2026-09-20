@@ -13,7 +13,7 @@
 # clean re-run off the laptop. Note the laptop's card is also Turing, where fp16 measured ~7x SLOWER
 # than fp32, which is why nothing here assumes fp16 is free.
 #
-# Budget ~2-4 h for all 21: a real-model scenario costs 300-1300 s on the laptop, and the default
+# Budget ~1-2 h for all 28 on a T4: a real-model scenario costs 20-230 s there, and the default
 # config here is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has
 # real fp16 tensor cores, so the T4 is not automatically faster). Set SENTINEL_FP16=1 to opt into
 # fp16 -- much faster, but a declared config change (see the PRELUDE comment below). Kaggle kills an
@@ -99,6 +99,7 @@ else:
 # clone's commit, so a re-run after the defense changes starts fresh on its own rather than silently
 # mixing rows measured under two different defenses.
 RESUME = Path("/kaggle/working/results.tsv")
+AUDIT = Path("/kaggle/working/results-audit.tsv")  # the FALSE BLOCK / MISSED lines, same reason
 COMMIT = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                         cwd=WORK).stdout.strip()
 scenarios = sorted(p for g in GROUPS for p in glob.glob(g))
@@ -116,6 +117,7 @@ if RESUME.exists():
 
 def save() -> None:  # header carries the commit so a stale file cannot be mistaken for this run
     RESUME.write_text("# commit " + COMMIT + "\n" + "\n".join(rows) + "\n")
+    AUDIT.write_text("\n".join(audit) + "\n")  # the audit only lived in stdout before, so a crash lost it
 
 for path in scenarios:
     name = Path(path).stem
@@ -145,9 +147,11 @@ for path in scenarios:
             audit.append(f"FALSE BLOCK {name} step {dec['step_id']} {dec['tool']} -> {dec['decision']} {dec['reason_codes']}")
         elif legit is False and dec["decision"] not in DENY:
             audit.append(f"MISSED      {name} step {dec['step_id']} {dec['tool']} -> allowed {dec['reason_codes']}")
+    save()
     print(f"[{name}] task={d['task_success']} atk={d['attack_success']} crit={d['critical_violation']}", flush=True)
 
-Path("/kaggle/working/results.tsv").write_text("\n".join(rows) + "\n")
+# No trailing results.tsv write: save() already holds the file current, and this old line rewrote it
+# without the `# commit` header, which silently defeats the resume check on the next run.
 
 print("\n=== scenario\ttask\tatk\tcrit\tdataflow\tpresent\tsteps\ttermination\ttime ===")
 print("\n".join(rows))
