@@ -73,7 +73,9 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
 FP16 = os.environ.get("SENTINEL_FP16") == "1"
 DTYPE = "float16" if FP16 else "bfloat16"
 THINKING = os.environ.get("SENTINEL_THINKING") == "1"
-BUDGET = 2560 if THINKING else 768
+# Same cap rationale as .scratch/kaggle-check.py -- and the same value, so the check and the
+# recording measure the same configuration. SENTINEL_BUDGET overrides both.
+BUDGET = int(os.environ.get("SENTINEL_BUDGET", 4096 if THINKING else 768))
 PRELUDE = ("import sentinel.cli as c\n"
            "from runner.qwen3_8b import OffloadAdapter\n"
            f"c._model_factory = lambda m: (lambda: OffloadAdapter("

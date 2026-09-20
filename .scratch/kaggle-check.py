@@ -73,7 +73,11 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
 #   It needs the bigger budget, because reasoning spends tokens before the action JSON appears.
 DTYPE = "float16" if os.environ.get("SENTINEL_FP16") == "1" else "bfloat16"
 THINKING = os.environ.get("SENTINEL_THINKING") == "1"
-BUDGET = 2560 if THINKING else 768
+# max_new_tokens is a cap, not a target -- generation still stops at EOS -- so this is sized for the
+# worst step, not the average one, and a generous cap costs nothing when thinking is short. A step
+# that reasons past the cap loses its action JSON and dies as NO_JSON ("model output contained no
+# JSON object"), which costs the whole row. SENTINEL_BUDGET overrides without a push-and-reclone.
+BUDGET = int(os.environ.get("SENTINEL_BUDGET", 4096 if THINKING else 768))
 PRELUDE = ("import sentinel.cli as c\n"
            "from runner.qwen3_8b import OffloadAdapter\n"
            f"c._model_factory = lambda m: (lambda: OffloadAdapter("
