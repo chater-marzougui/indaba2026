@@ -13,13 +13,16 @@
 # clean re-run off the laptop. Note the laptop's card is also Turing, where fp16 measured ~7x SLOWER
 # than fp32, which is why nothing here assumes fp16 is free.
 #
-# Budget ~1-2 h for all 28 on a T4: a real-model scenario costs 20-230 s there, and the default
-# config here is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has
-# real fp16 tensor cores, so the T4 is not automatically faster). Set SENTINEL_FP16=1 to opt into
-# fp16 -- much faster, but a declared config change (see the PRELUDE comment below). Kaggle kills an
+# Budget ~1-2 h for all 28 on one T4, so ~half that on the T4 x2 the settings ask for: a real-model
+# scenario costs 20-230 s there, and the scenarios run one per card in parallel (see the GPUS block
+# below -- the adapter only ever uses cuda:0, so a second card is free throughput). The default
+# config is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has real
+# fp16 tensor cores, so the T4 is not automatically faster). Set SENTINEL_FP16=1 to opt into fp16 --
+# much faster again, but a declared config change (see the PRELUDE comment below). Kaggle kills an
 # idle session, so don't run anything else meanwhile.
 
-import glob, json, os, shutil, subprocess, sys, time, urllib.request
+import glob, json, os, shutil, subprocess, sys, threading, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO   = "https://github.com/chater-marzougui/indaba2026.git"   # <- your repo
@@ -70,9 +73,9 @@ PRELUDE = ("import sentinel.cli as c\n"
            "c._model_factory = lambda m: (lambda: H(m, dtype='float16'))\n") if FP16 else ""
 
 # Typer app invoked via -c so we never depend on the console script being on PATH.
-def sentinel(*args):
+def sentinel(*args, env=None):
     return subprocess.run([sys.executable, "-c", PRELUDE + "from sentinel.cli import app; app()", *args],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=env)
 
 # Stopping the cell does NOT kill this Popen: a stopped cell only interrupts the cell's own Python,
 # so the old uvicorn keeps holding PORT -- and WORK was just rmtree'd, so it is serving the old code
@@ -119,36 +122,62 @@ def save() -> None:  # header carries the commit so a stale file cannot be mista
     RESUME.write_text("# commit " + COMMIT + "\n" + "\n".join(rows) + "\n")
     AUDIT.write_text("\n".join(audit) + "\n")  # the audit only lived in stdout before, so a crash lost it
 
-for path in scenarios:
+# Kaggle's "GPU T4 x2" hands over two cards and the adapter pins its model to cuda:0, so a
+# single-process sweep leaves half the box dark -- which is exactly the 30-50% utilisation a 50-min
+# run shows. One scenario per card, each in its own process with CUDA_VISIBLE_DEVICES set, so the
+# adapter's cuda:0 is a different physical card per worker. Nothing about the agent changes: same
+# bf16, same model, same defense, same prompts. Only the wall clock does.
+try:
+    import torch
+    GPUS = max(1, torch.cuda.device_count())
+except Exception as exc:  # noqa: BLE001 - the sweep must still run if torch is unavailable
+    print(f"torch unavailable ({exc}); running single-process")
+    GPUS = 1
+
+lock = threading.Lock()  # rows/audit/save are shared; the subprocesses themselves are independent
+
+
+def one(job) -> None:
+    path, gpu = job
     name = Path(path).stem
-    if name in done:
-        print(f"[{name}] skipped (already in results.tsv)", flush=True)
-        continue
+    with lock:
+        if name in done:
+            print(f"[{name}] skipped (already in results.tsv)", flush=True)
+            return
     before = set(glob.glob(f"artifacts/*{name}-http_defense-*"))
     t0 = time.time()
-    r = sentinel("run", "--scenario", path, "--defense-url", f"http://127.0.0.1:{PORT}", "--model", MODEL)
-    new = sorted(set(glob.glob(f"artifacts/*{name}-http_defense-*")) - before)
-    if not new:
-        rows.append(f"{name}\tNO-ARTIFACT\t{int(time.time()-t0)}s\trc={r.returncode}")
-        save()
-        continue
-    d = json.loads(next(Path(new[-1]).glob("*.summary.json")).read_text())
-    rows.append("\t".join(str(x) for x in [
-        name, d["task_success"], d["attack_success"], d["critical_violation"],
-        d["data_flow_violation"], d["attack_present"], d["steps"], d["termination"],
-        f"{int(time.time()-t0)}s"]))
-    save()  # durable now, not at hour 3
+    try:
+        r = sentinel("run", "--scenario", path, "--defense-url", f"http://127.0.0.1:{PORT}",
+                     "--model", MODEL, env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)))
+        new = sorted(set(glob.glob(f"artifacts/*{name}-http_defense-*")) - before)
+        if not new:
+            row = f"{name}\tNO-ARTIFACT\t{int(time.time()-t0)}s\trc={r.returncode}"
+        else:
+            d = json.loads(next(Path(new[-1]).glob("*.summary.json")).read_text())
+            row = "\t".join(str(x) for x in [
+                name, d["task_success"], d["attack_success"], d["critical_violation"],
+                d["data_flow_violation"], d["attack_present"], d["steps"], d["termination"],
+                f"{int(time.time()-t0)}s"])
+            # The summary's per-step `legitimate` label is the evaluator's own ground truth:
+            # false block = we denied something legitimate; missed = we allowed an illegitimate step.
+            for dec in d.get("decisions", []):
+                legit = dec.get("legitimate")
+                if legit and dec["decision"] in DENY:
+                    audit.append(f"FALSE BLOCK {name} step {dec['step_id']} {dec['tool']} -> {dec['decision']} {dec['reason_codes']}")
+                elif legit is False and dec["decision"] not in DENY:
+                    audit.append(f"MISSED      {name} step {dec['step_id']} {dec['tool']} -> allowed {dec['reason_codes']}")
+            print(f"[{name}] task={d['task_success']} atk={d['attack_success']} crit={d['critical_violation']}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - one bad scenario must not kill an hour of GPU
+        row = f"{name}\tERROR\t{int(time.time()-t0)}s\t{exc}"
+    with lock:
+        rows.append(row)
+        save()  # durable now, not at hour 3
 
-    # The summary's per-step `legitimate` label is the evaluator's own ground truth:
-    # false block = we denied something legitimate; missed = we allowed an illegitimate step.
-    for dec in d.get("decisions", []):
-        legit = dec.get("legitimate")
-        if legit and dec["decision"] in DENY:
-            audit.append(f"FALSE BLOCK {name} step {dec['step_id']} {dec['tool']} -> {dec['decision']} {dec['reason_codes']}")
-        elif legit is False and dec["decision"] not in DENY:
-            audit.append(f"MISSED      {name} step {dec['step_id']} {dec['tool']} -> allowed {dec['reason_codes']}")
-    save()
-    print(f"[{name}] task={d['task_success']} atk={d['attack_success']} crit={d['critical_violation']}", flush=True)
+
+jobs = [(p, i % GPUS) for i, p in enumerate(scenarios)]
+print(f"{GPUS} GPU(s) visible -- {len(jobs)} scenario(s) to run")
+with ThreadPoolExecutor(max_workers=GPUS) as pool:
+    list(pool.map(one, jobs))
 
 # No trailing results.tsv write: save() already holds the file current, and this old line rewrote it
 # without the `# commit` header, which silently defeats the resume check on the next run.
