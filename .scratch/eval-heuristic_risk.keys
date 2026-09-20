@@ -1,0 +1,1 @@
+['asr', 'attack_count', 'benign_count', 'brier', 'btu', 'cvr', 'decisions', 'defense_errors', 'dfi', 'ece', 'escalation_precision', 'escalation_rate', 'fbr', 'latency_median_ms', 'latency_p95_ms', 'scenario_count', 'tui', 'uer']
