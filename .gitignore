@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-gpu/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -20,8 +21,15 @@ competition.yaml
 *.joblib
 *.safetensors
 *.bin
+# ...except the defense's own learned monitor: decision.py loads it, and a run without it is a
+# different defense. 33 KB, ships with the submission.
+!my-defense/app/monitor.joblib
 presentations/
 presentation-assets/
 
 .deck-build/
 .deck-notes-build/
+
+# Scratch: the analysis scripts and findings are kept, the run logs are not
+.scratch/logs/
+.scratch/*.log

@@ -1,0 +1,12 @@
+name: python-defense-starter
+kind: defense
+api_version: v1
+team: your-team-name
+port: 8080
+models: []          # declare every external pretrained model: {name, source, license}
+datasets: []        # declare every external dataset: {name, source, license}
+resources:
+  memory: 1g
+  cpus: 1.0
+  gpus: 0
+description: Rule-based example defense. Replace app/decision.py with your method.
