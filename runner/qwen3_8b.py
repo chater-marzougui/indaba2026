@@ -12,19 +12,18 @@ placement and decode budget explicitly on the participant's side of the line
 reference agent" paragraph.
 
 Wired in through ``sentinel.cli._model_factory``, the same hook the CLI itself uses, so nothing
-under ``src/sentinel/`` is modified::
+under ``src/sentinel/`` is modified. The ``-c`` prelude the two Kaggle cells share::
 
-    python -c "import sentinel.cli as c; from runner.qwen3_8b import build; \\
-               c._model_factory = lambda m: (lambda: build(m)); \\
+    python -c "import sentinel.cli as c; from runner.qwen3_8b import OffloadAdapter; \\
+               c._model_factory = lambda m: (lambda: OffloadAdapter( \\
+                   m, dtype='bfloat16', enable_thinking=False, max_new_tokens=768)); \\
                from sentinel.cli import app; app()" \\
-        run --scenario <path> --defense allow_all --model qwen3-8b
+        run --scenario <path> --defense allow_all --model Qwen/Qwen3-8B
 """
 
 from __future__ import annotations
 
 from sentinel.models.hf_adapter import DEFAULT_MODEL, HFModelAdapter
-
-ALIASES = ("qwen3-8b", "qwen3", "qwen", "default")
 
 
 class OffloadAdapter(HFModelAdapter):
@@ -53,13 +52,3 @@ class OffloadAdapter(HFModelAdapter):
         self._enable_thinking = enable_thinking
         self._goal = ""
         self._tools: list[dict[str, object]] = []
-
-
-def build(model: str = DEFAULT_MODEL, dtype: str = "bfloat16") -> OffloadAdapter:
-    """``--model`` argument -> adapter, with the same aliases ``sentinel.cli._model_factory`` uses.
-
-    ``dtype`` is separate because it is a declared config change, not a model choice: bfloat16 is the
-    faithful default, float16 is the escape hatch when a card emulates bf16 (Turing has no native
-    support for it). Whichever you pick, use it for the check and the recording both.
-    """
-    return OffloadAdapter(DEFAULT_MODEL if model in ALIASES else model, dtype=dtype)

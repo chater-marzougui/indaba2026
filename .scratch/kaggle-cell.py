@@ -66,14 +66,18 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
 # model.to(device), which cannot shard, and 16.4 GB of bf16 weights do not fit on one T4.
 # device_map="auto" spreads them across both cards. See runner/qwen3_8b.py.
 #
-# SENTINEL_FP16=1 stays available -- a T4 has real fp16 tensor cores and only emulates bf16, so it
-# is faster -- but it is a declared config change: results stop being comparable with the bf16 runs
-# already on record.
+# SENTINEL_FP16=1 -- a T4 has real fp16 tensor cores and only emulates bf16, so it is faster -- but
+# it is a declared config change: results stop being comparable with the bf16 runs already on record.
+# SENTINEL_THINKING=1 -- Qwen3 reasoning mode, off by upstream default. KEEP THIS IN STEP WITH
+# .scratch/kaggle-check.py: validate and record in the same configuration or the check is worthless.
 FP16 = os.environ.get("SENTINEL_FP16") == "1"
 DTYPE = "float16" if FP16 else "bfloat16"
+THINKING = os.environ.get("SENTINEL_THINKING") == "1"
+BUDGET = 2560 if THINKING else 768
 PRELUDE = ("import sentinel.cli as c\n"
            "from runner.qwen3_8b import OffloadAdapter\n"
-           f"c._model_factory = lambda m: (lambda: OffloadAdapter(m, dtype={DTYPE!r}))\n")
+           f"c._model_factory = lambda m: (lambda: OffloadAdapter("
+           f"m, dtype={DTYPE!r}, enable_thinking={THINKING!r}, max_new_tokens={BUDGET}))\n")
 
 # Typer app invoked via -c so we never depend on the console script being on PATH.
 def sentinel(*args, env=None):

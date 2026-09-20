@@ -63,13 +63,21 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
 
 # Our loader, ours, so src/sentinel/ stays untouched. See runner/qwen3_8b.py.
 #
-# The dtype switch mirrors .scratch/kaggle-cell.py exactly, so the check and the recording cannot
-# silently run at different precisions. A T4 has no native bf16 (Turing emulates it) and real fp16
-# tensor cores, so if bf16 is too slow here, set SENTINEL_FP16=1 and set it again for the sweep.
+# Both switches mirror .scratch/kaggle-cell.py exactly, so the check and the recording cannot
+# silently run in different configurations.
+#
+# SENTINEL_FP16=1 -- T4 is Turing: bf16 is emulated there while fp16 has real tensor cores. Speed only.
+# SENTINEL_THINKING=1 -- Qwen3's reasoning mode, off by upstream default. The early-stop failure is
+#   the 8B skipping a record it never planned around ("answer from the goal text and send its final
+#   response before the payload was ever in front of it"); thinking is the thing that makes it plan.
+#   It needs the bigger budget, because reasoning spends tokens before the action JSON appears.
 DTYPE = "float16" if os.environ.get("SENTINEL_FP16") == "1" else "bfloat16"
+THINKING = os.environ.get("SENTINEL_THINKING") == "1"
+BUDGET = 2560 if THINKING else 768
 PRELUDE = ("import sentinel.cli as c\n"
-           "from runner.qwen3_8b import build\n"
-           f"c._model_factory = lambda m: (lambda: build(m, dtype={DTYPE!r}))\n")
+           "from runner.qwen3_8b import OffloadAdapter\n"
+           f"c._model_factory = lambda m: (lambda: OffloadAdapter("
+           f"m, dtype={DTYPE!r}, enable_thinking={THINKING!r}, max_new_tokens={BUDGET}))\n")
 
 
 def sentinel(*args):
