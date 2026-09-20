@@ -1,4 +1,4 @@
-#@title SENTINEL GPU sweep — 18 mandated scenarios, verdict table + decision audit
+#@title SENTINEL GPU sweep — verdict table + decision audit
 #
 # Setup, once:
 #   1. Push the repo (this cell clones it, so nothing to zip).
@@ -9,9 +9,9 @@
 # Then run this cell. It prints a TSV (one line per scenario) plus every false/missed block, and
 # writes /kaggle/working/results.tsv so the same data is downloadable from the Output tab.
 #
-# Why Kaggle: the 1.5B model runs here in fp16 on tensor cores. On the GTX 1660 Ti fp16 was ~7x
-# SLOWER than fp32 (Turing's fp16 path is emulated there), so this is the same model, same
-# scenarios, same defense — only the hardware changes. Declare that in the technical report.
+# Why Kaggle: the same model, same scenarios, same defense — only the hardware changes, so this is a
+# clean re-run off the laptop. Note the laptop's card is also Turing, where fp16 measured ~7x SLOWER
+# than fp32, which is why nothing here assumes fp16 is free.
 #
 # Budget ~2-4 h for all 21: a real-model scenario costs 300-1300 s on the laptop, and the default
 # config here is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has
