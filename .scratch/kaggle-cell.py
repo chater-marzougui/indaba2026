@@ -74,6 +74,14 @@ def sentinel(*args):
     return subprocess.run([sys.executable, "-c", PRELUDE + "from sentinel.cli import app; app()", *args],
                           capture_output=True, text=True)
 
+# Stopping the cell does NOT kill this Popen: a stopped cell only interrupts the cell's own Python,
+# so the old uvicorn keeps holding PORT -- and WORK was just rmtree'd, so it is serving the old code
+# out of a directory that no longer exists. The healthz poll below would then pass against that stale
+# process and every row would audit dead code. Kill any listener first; restarting the whole session
+# also works but throws away the HF cache.
+subprocess.run(["pkill", "-f", "uvicorn app.main:app"])
+time.sleep(1)
+
 srv = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(PORT)],
                        cwd=WORK / "my-defense",
                        stdout=open("/kaggle/working/defense.log", "w"), stderr=subprocess.STDOUT)
@@ -86,23 +94,48 @@ for _ in range(60):
 else:
     raise SystemExit("defense never came up — see /kaggle/working/defense.log")
 
+# Resume: a 2-4 h sweep must survive a crash or an interrupted session, so each row is appended to
+# results.tsv as it lands and any scenario already in that file is skipped. The file is keyed to the
+# clone's commit, so a re-run after the defense changes starts fresh on its own rather than silently
+# mixing rows measured under two different defenses.
+RESUME = Path("/kaggle/working/results.tsv")
+COMMIT = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                        cwd=WORK).stdout.strip()
 scenarios = sorted(p for g in GROUPS for p in glob.glob(g))
 rows, audit = [], []
+done = {}
+if RESUME.exists():
+    lines = [ln for ln in RESUME.read_text().splitlines() if ln.strip()]
+    prev = lines[0].split()[-1] if lines and lines[0].startswith("# commit ") else None
+    if prev == COMMIT:
+        done = {ln.split("\t")[0]: ln for ln in lines[1:]}
+        rows = list(done.values())
+        print(f"resuming: {len(done)} scenario(s) already measured at {COMMIT}")
+    elif prev:
+        print(f"results.tsv is from {prev}, this clone is {COMMIT} -- starting fresh")
+
+def save() -> None:  # header carries the commit so a stale file cannot be mistaken for this run
+    RESUME.write_text("# commit " + COMMIT + "\n" + "\n".join(rows) + "\n")
 
 for path in scenarios:
     name = Path(path).stem
+    if name in done:
+        print(f"[{name}] skipped (already in results.tsv)", flush=True)
+        continue
     before = set(glob.glob(f"artifacts/*{name}-http_defense-*"))
     t0 = time.time()
     r = sentinel("run", "--scenario", path, "--defense-url", f"http://127.0.0.1:{PORT}", "--model", MODEL)
     new = sorted(set(glob.glob(f"artifacts/*{name}-http_defense-*")) - before)
     if not new:
         rows.append(f"{name}\tNO-ARTIFACT\t{int(time.time()-t0)}s\trc={r.returncode}")
+        save()
         continue
     d = json.loads(next(Path(new[-1]).glob("*.summary.json")).read_text())
     rows.append("\t".join(str(x) for x in [
         name, d["task_success"], d["attack_success"], d["critical_violation"],
         d["data_flow_violation"], d["attack_present"], d["steps"], d["termination"],
         f"{int(time.time()-t0)}s"]))
+    save()  # durable now, not at hour 3
 
     # The summary's per-step `legitimate` label is the evaluator's own ground truth:
     # false block = we denied something legitimate; missed = we allowed an illegitimate step.
