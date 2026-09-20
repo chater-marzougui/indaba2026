@@ -13,8 +13,11 @@
 # SLOWER than fp32 (Turing's fp16 path is emulated there), so this is the same model, same
 # scenarios, same defense — only the hardware changes. Declare that in the technical report.
 #
-# Expect ~2-3 h for all 21 (a real-model scenario costs 300-1300 s on the laptop; T4 should beat
-# that, but budget for it). Kaggle kills an idle session, so don't run anything else meanwhile.
+# Budget ~2-4 h for all 21: a real-model scenario costs 300-1300 s on the laptop, and the default
+# config here is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has
+# real fp16 tensor cores, so the T4 is not automatically faster). Set SENTINEL_FP16=1 to opt into
+# fp16 -- much faster, but a declared config change (see the PRELUDE comment below). Kaggle kills an
+# idle session, so don't run anything else meanwhile.
 
 import glob, json, os, shutil, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -47,11 +50,28 @@ os.chdir(WORK)
 print("cloned", subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())
 
 # Kaggle's image already ships torch+CUDA; `-e .` only adds the simulator and transformers.
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", ".", "transformers>=4.44"], check=True)
+# scipy/sklearn/joblib are the defense's own deps (my-defense/requirements.txt) for the monitor.
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", ".", "transformers>=4.44",
+                "scikit-learn", "scipy", "joblib"], check=True)
+
+# The adapter loads with local_files_only=True, so the weights must already be in the cache or every
+# scenario dies at step 0. snapshot_download just fetches files -- no 3 GB model in RAM. (Internet On.)
+if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MODEL.replace('/', '--')}")):
+    subprocess.run([sys.executable, "-c",
+                    f"from huggingface_hub import snapshot_download; snapshot_download({MODEL!r})"], check=True)
+
+# OPTIONAL, and it changes the agent's numerics: the Qwen2.5 checkpoint is bf16, and a T4 emulates
+# bf16 while it has real fp16 tensor cores, so fp16 is several times faster. Set the env var to
+# opt in -- and declare it in the technical report, because results are then no longer comparable
+# with the bf16 runs already on record. Unset: identical config to the laptop.
+FP16 = os.environ.get("SENTINEL_FP16") == "1"
+PRELUDE = ("import sentinel.cli as c\n"
+           "from sentinel.models.hf_adapter import HFModelAdapter as H\n"
+           "c._model_factory = lambda m: (lambda: H(m, dtype='float16'))\n") if FP16 else ""
 
 # Typer app invoked via -c so we never depend on the console script being on PATH.
 def sentinel(*args):
-    return subprocess.run([sys.executable, "-c", "from sentinel.cli import app; app()", *args],
+    return subprocess.run([sys.executable, "-c", PRELUDE + "from sentinel.cli import app; app()", *args],
                           capture_output=True, text=True)
 
 srv = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(PORT)],
