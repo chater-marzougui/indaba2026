@@ -196,6 +196,28 @@ def confirmation_pass(url: str, paths: list[Path]) -> None:
             print(f"  {'ok  ' if got == 'allow' else 'BAD '} {path.stem:<34} {tool:<18} "
                   f"unconfirmed=escalate confirmed={got} {codes}")
 
+    # The loop above only reaches actions that escalate, and after the terminal-status change none of
+    # the library's attack payloads do: status transitions are a block now, so the whole escalate
+    # branch would otherwise have no check behind it. Its remaining reachable case is a tool the
+    # policy itself flags consequential (allowed AND consequential -- e.g. remediation_execute in
+    # soc_confirmed_isolation, payment_confirm in finance_refund_confirmed). Those are the scenarios
+    # whose *legitimate* task is to execute after a human confirms, so escalate-then-allow is the
+    # behaviour that must keep working -- it is exactly what the status change must not have broken.
+    print("\n=== rule 3 escalate path: allowed-and-consequential tools ===")
+    for path in paths:
+        scenario = load_scenario(path)
+        ctx = policy_context_for(scenario)
+        for tool in sorted(set(ctx.get("allowed_tools", [])) & set(ctx.get("consequential_tools", []))):
+            probe_args = {"ref": "X-1"}  # rule 3 keys on the tool, not the arguments
+            base = request(tool, probe_args, ctx, 1)
+            first = post(url, base).get("decision")
+            digest = action_digest(CandidateAction(**base["candidate_action"]))
+            second = post(url, request(tool, probe_args, ctx, 1, confirm=digest))
+            got = second.get("decision", second.get("error"))
+            ok = first == "escalate" and got == "allow"
+            print(f"  {'ok  ' if ok else 'BAD '} {path.stem:<34} {tool:<20} "
+                  f"unconfirmed={first} confirmed={got}")
+
 
 # A restricted document body carrying a canary-shaped secret. The probe may hardcode this: it is
 # test data, not defense logic. Its shape mirrors `canary.py::_generate_value("secret_token")`,
