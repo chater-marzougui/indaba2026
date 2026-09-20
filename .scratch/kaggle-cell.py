@@ -13,13 +13,12 @@
 # clean re-run off the laptop. Note the laptop's card is also Turing, where fp16 measured ~7x SLOWER
 # than fp32, which is why nothing here assumes fp16 is free.
 #
-# Budget ~1-2 h for all 28 on one T4, so ~half that on the T4 x2 the settings ask for: a real-model
-# scenario costs 20-230 s there, and the scenarios run one per card in parallel (see the GPUS block
-# below -- the adapter only ever uses cuda:0, so a second card is free throughput). The default
-# config is the *same* bf16 the laptop ran (Qwen2.5 ships bf16; a T4 emulates bf16 while it has real
-# fp16 tensor cores, so the T4 is not automatically faster). Set SENTINEL_FP16=1 to opt into fp16 --
-# much faster again, but a declared config change (see the PRELUDE comment below). Kaggle kills an
-# idle session, so don't run anything else meanwhile.
+# This now runs the OFFICIAL reference agent, Qwen3-8B, unquantized. It is serial: 16.4 GB of bf16
+# weights do not fit one T4, so device_map="auto" spans both cards and a second concurrent scenario
+# would OOM (see the GPUS block below). Budget several hours for the full 28 -- and note Kaggle caps
+# a session, so for the video you want a shortlist, not the whole library: point GROUPS at the
+# scenarios .scratch/kaggle-check.py reported attack_success=True for. Kaggle kills an idle session,
+# so don't run anything else meanwhile.
 
 import glob, json, os, shutil, subprocess, sys, threading, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +27,7 @@ from pathlib import Path
 REPO   = "https://github.com/chater-marzougui/indaba2026.git"   # <- your repo
 BRANCH = "main"
 WORK   = Path("/kaggle/working/kit")
-MODEL  = "Qwen/Qwen2.5-1.5B-Instruct"                    # the reference agent, unchanged
+MODEL  = "Qwen/Qwen3-8B"                                 # the official reference agent
 PORT   = 8081
 GROUPS = ("scenarios/public/enterprise/*.yaml", "scenarios/public/soc/*.yaml",
           "scenarios/validation/enterprise_val*.yaml", "scenarios/validation/soc_val*.yaml",
@@ -55,7 +54,7 @@ print("cloned", subprocess.run(["git", "log", "--oneline", "-1"], capture_output
 # Kaggle's image already ships torch+CUDA; `-e .` only adds the simulator and transformers.
 # scipy/sklearn/joblib are the defense's own deps (my-defense/requirements.txt) for the monitor.
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", ".", "transformers>=4.44",
-                "scikit-learn", "scipy", "joblib"], check=True)
+                "accelerate", "scikit-learn", "scipy", "joblib"], check=True)
 
 # The adapter loads with local_files_only=True, so the weights must already be in the cache or every
 # scenario dies at step 0. snapshot_download just fetches files -- no 3 GB model in RAM. (Internet On.)
@@ -63,14 +62,18 @@ if not os.path.exists(os.path.expanduser(f"~/.cache/huggingface/hub/models--{MOD
     subprocess.run([sys.executable, "-c",
                     f"from huggingface_hub import snapshot_download; snapshot_download({MODEL!r})"], check=True)
 
-# OPTIONAL, and it changes the agent's numerics: the Qwen2.5 checkpoint is bf16, and a T4 emulates
-# bf16 while it has real fp16 tensor cores, so fp16 is several times faster. Set the env var to
-# opt in -- and declare it in the technical report, because results are then no longer comparable
-# with the bf16 runs already on record. Unset: identical config to the laptop.
+# Our own loader, so nothing under src/sentinel/ is modified: HFModelAdapter.__init__ ends in
+# model.to(device), which cannot shard, and 16.4 GB of bf16 weights do not fit on one T4.
+# device_map="auto" spreads them across both cards. See runner/qwen3_8b.py.
+#
+# SENTINEL_FP16=1 stays available -- a T4 has real fp16 tensor cores and only emulates bf16, so it
+# is faster -- but it is a declared config change: results stop being comparable with the bf16 runs
+# already on record.
 FP16 = os.environ.get("SENTINEL_FP16") == "1"
+DTYPE = "float16" if FP16 else "bfloat16"
 PRELUDE = ("import sentinel.cli as c\n"
-           "from sentinel.models.hf_adapter import HFModelAdapter as H\n"
-           "c._model_factory = lambda m: (lambda: H(m, dtype='float16'))\n") if FP16 else ""
+           "from runner.qwen3_8b import OffloadAdapter\n"
+           f"c._model_factory = lambda m: (lambda: OffloadAdapter(m, dtype={DTYPE!r}))\n")
 
 # Typer app invoked via -c so we never depend on the console script being on PATH.
 def sentinel(*args, env=None):
@@ -122,17 +125,11 @@ def save() -> None:  # header carries the commit so a stale file cannot be mista
     RESUME.write_text("# commit " + COMMIT + "\n" + "\n".join(rows) + "\n")
     AUDIT.write_text("\n".join(audit) + "\n")  # the audit only lived in stdout before, so a crash lost it
 
-# Kaggle's "GPU T4 x2" hands over two cards and the adapter pins its model to cuda:0, so a
-# single-process sweep leaves half the box dark -- which is exactly the 30-50% utilisation a 50-min
-# run shows. One scenario per card, each in its own process with CUDA_VISIBLE_DEVICES set, so the
-# adapter's cuda:0 is a different physical card per worker. Nothing about the agent changes: same
-# bf16, same model, same defense, same prompts. Only the wall clock does.
-try:
-    import torch
-    GPUS = max(1, torch.cuda.device_count())
-except Exception as exc:  # noqa: BLE001 - the sweep must still run if torch is unavailable
-    print(f"torch unavailable ({exc}); running single-process")
-    GPUS = 1
+# One scenario per card is only free when a single card can hold the whole model. Qwen3-8B in bf16
+# is ~16.4 GB of weights against a T4's ~14.6 GB usable, so device_map="auto" spreads it across BOTH
+# cards -- a second concurrent scenario would OOM. Serial. (The 1.5B runs did fit on one card and
+# parallelised; that is where 50 min -> 28 came from, and it comes back if MODEL goes back.)
+GPUS = 1
 
 lock = threading.Lock()  # rows/audit/save are shared; the subprocesses themselves are independent
 
@@ -147,8 +144,12 @@ def one(job) -> None:
     before = set(glob.glob(f"artifacts/*{name}-http_defense-*"))
     t0 = time.time()
     try:
+        # Pin a card only when there is more than one worker. A single worker must see every card,
+        # because device_map="auto" needs all of them to hold the 8B -- hiding the second one here
+        # would silently push half the model into RAM.
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)) if GPUS > 1 else None
         r = sentinel("run", "--scenario", path, "--defense-url", f"http://127.0.0.1:{PORT}",
-                     "--model", MODEL, env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)))
+                     "--model", MODEL, env=env)
         new = sorted(set(glob.glob(f"artifacts/*{name}-http_defense-*")) - before)
         if not new:
             row = f"{name}\tNO-ARTIFACT\t{int(time.time()-t0)}s\trc={r.returncode}"
